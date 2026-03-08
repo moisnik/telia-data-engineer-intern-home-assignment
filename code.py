@@ -1,5 +1,7 @@
 import requests
 import pandas as pd
+import datetime as dt
+import sqlite3
 
 def fetch_capitals():
  #Fetch all European countries and their capital coordinates from RestCountries.
@@ -33,6 +35,8 @@ def fetch_weather_data(coordinates, start, end):
  }
  
  data = requests.get(url, params=params).json()
+
+ print(data)
 
  return data['daily']
 
@@ -68,21 +72,77 @@ def extract():
  countries_data = fetch_capitals()
  data = []
 
+ # find dates to get weather data for last 30 days
+ end = dt.date.today()
+ start = end - dt.timedelta(days=29) 
+
+
  for country in countries_data:
-  weather_data = fetch_weather_data(country['coordinates'], '2024-01-01', '2024-01-31')
+  weather_data = fetch_weather_data(country['coordinates'], str(start), str(end))
   data.extend(combine_country_weather(country, weather_data))
 
- return data
+ 
+ dataFrame = pd.DataFrame(data)
+ return dataFrame
 
-def transform(rows):
- df = pd.DataFrame(rows)
- print(df.info())
- print(df.shape)
+def transform(df):
+ # Detect rows with missing values and drop them
+ if df.isnull().values.any():
+  df.dropna()
+  print('Found and dropped rows with missing values.')
+  
+ # Convert the duration of sunshine from seconds to full minutes of sunshine
+ df['sunshine_duration_minutes'] = df['sunshine_duration'] // 60
+ df = df.drop(columns=['sunshine_duration'])
+ df.sunshine_duration_minutes = df.sunshine_duration_minutes.astype(int)
+
+ # Convert the data type of dates from string to date
+ df['date'] = pd.to_datetime(df['date'])
+
+ # Sort the capitals in chronological order (should be by default)
+ df = df.sort_values(['capital', 'date'])
+
+ return df
+
+
+def load(raw_data, cleaned_data):
+ database_connection = sqlite3.connect('weather_data.db')
+
+ raw_data.to_sql('raw_weather', database_connection, if_exists='replace', index=False)
+ cleaned_data.to_sql('cleaned_weather', database_connection, if_exists='replace', index=False)
+
+ database_connection.close()
+
+def create_views():
+ database_connection = sqlite3.connect('weather_data.db')
+
+ cursor = database_connection.cursor()
+
+ cursor.execute('DROP VIEW IF EXISTS v_capitals_ranked_by_avg_temperature')
+ cursor.execute('''
+                CREATE VIEW v_capitals_ranked_by_avg_temperature AS' 
+                SELECT capital, AVG((min_temperature+max_temperature)/2) AS average_temperature
+                FROM cleaned_weather
+                GROUP BY capital
+                ORDER BY average_temperature DESC;
+ ''')
+
+ database_connection.commit()
+ database_connection.close()
+
 
 
 def pipeline():
- rows = extract()
- transform(rows)
+ raw_df = extract()
+ cleaned_df = transform(raw_df)
+ load(raw_df, cleaned_df)
+ create_views()
+
 
 pipeline()
+
+conn = sqlite3.connect("weather_data.db")
+
+c = conn.cursor()
+c.execute('SELECT * FROM v_capitals_ranked_by_avg_temperature LIMIT 10;')
 
